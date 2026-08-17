@@ -42,14 +42,14 @@ def money(value):
     """Format a number as a readable cost value."""
     value = float(value)
     if abs(value) >= 1_000_000:
-        return f"{value / 1_000_000:.2f}M"
+        return f"£{value / 1_000_000:.2f}M"
     if abs(value) >= 1_000:
-        return f"{value / 1_000:.1f}K"
-    return f"{value:,.0f}"
+        return f"£{value / 1_000:.1f}K"
+    return f"£{value:,.0f}"
 
 
 def full_money(value):
-    return f"{float(value):,.2f}"
+    return f"£{float(value):,.2f}"
 
 
 def pct(value):
@@ -69,56 +69,111 @@ def make_chart(department_df, department, last_month, output_dir):
             actual=("actuals_cost", "sum"),
         )
     )
+
     monthly["actual_incl_vat"] = monthly["actual"] * 1.20
 
     # Display all months from Jan through the selected last month.
     labels = monthly["month"].dt.strftime("%b").tolist()
     x = range(len(monthly))
-    width = 0.36
 
-    fig, ax = plt.subplots(figsize=(12, 3.7), dpi=150)
+    width = 0.4
+    gap = 0.08
 
-    ax.bar(
-        [i - width / 2 for i in x],
+    # Increased height
+    fig, ax = plt.subplots(figsize=(12, 5.2), dpi=150)
+
+    budget_bars = ax.bar(
+        [i - (width + gap) / 2 for i in x],
         monthly["budget"],
         width=width,
-        color="#1f77b4",  # Budget = blue
+        color="#1f77b4",
         label="Budget Cost",
     )
-    ax.bar(
-        [i + width / 2 for i in x],
+
+    actual_bars = ax.bar(
+        [i + (width + gap) / 2 for i in x],
         monthly["actual_incl_vat"],
         width=width,
-        color="#ff7f0e",  # Actual = orange
+        color="#ff7f0e",
         label="Actual Cost incl. VAT",
+    )
+
+    # Add values above bars
+    ax.bar_label(
+        budget_bars,
+        fmt=lambda x: f"£{x:,.0f}",
+        padding=3,
+        fontsize=8
+    )
+
+    ax.bar_label(
+        actual_bars,
+        fmt=lambda x: f"£{x:,.0f}",
+        padding=3,
+        fontsize=8
     )
 
     ax.set_xticks(list(x))
     ax.set_xticklabels(labels)
+
     ax.set_xlabel("Month")
     ax.set_ylabel("Cost")
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
-    ax.grid(axis="y", linestyle="--", alpha=0.25)
-    ax.set_axisbelow(True)
-    # ax.legend(loc="upper left", frameon=False, ncols=2)
-    ax.legend(loc="upper right",bbox_to_anchor=(1, 1.12),frameon=False,ncols=2)
-    ax.set_title("Monthly Budget vs Actual Cost (incl. VAT)", loc="left",
-                 fontsize=12, fontweight="bold")
 
-    # Give the chart some breathing room.
+    ax.yaxis.set_major_formatter(
+        FuncFormatter(lambda v, _: f"{v:,.0f}")
+    )
+
+    ax.grid(
+        axis="y",
+        linestyle="--",
+        alpha=0.25
+    )
+
+    ax.set_axisbelow(True)
+
+    # Add 15% space above the tallest bar
+    max_cost = max(
+        monthly["budget"].max(),
+        monthly["actual_incl_vat"].max()
+    )
+
+    ax.set_ylim(0, max_cost * 1.15)
+
+    # Legend
+    ax.legend(
+        loc="upper right",
+        bbox_to_anchor=(1, 1.08),
+        frameon=False,
+        ncols=2
+    )
+
+    ax.set_title(
+        "Monthly Budget vs Actual Cost (incl. VAT)",
+        loc="left",
+        fontsize=12,
+        fontweight="bold"
+    )
+
     ax.margins(x=0.02)
-    # fig.tight_layout()s
-    fig.tight_layout(rect=[0, 0, 1, 0.90])
+
+    # Leave room for title and legend
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
 
     safe_name = "".join(
         c if c.isalnum() or c in ("-", "_") else "_"
         for c in department
     )
-    chart_path = output_dir / f"{safe_name}.png"
-    fig.savefig(chart_path, bbox_inches="tight")
-    plt.close(fig)
-    return chart_path
 
+    chart_path = output_dir / f"{safe_name}.png"
+
+    fig.savefig(
+        chart_path,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
+
+    return chart_path
 
 def build_report(csv_path, output_pdf, last_month, vat_rate):
     df = pd.read_csv(csv_path)
@@ -178,7 +233,7 @@ def build_report(csv_path, output_pdf, last_month, vat_rate):
         "WidgetValue",
         parent=styles["Normal"],
         fontName="Helvetica-Bold",
-        fontSize=15,
+        fontSize=13,
         textColor=colors.HexColor("#172033"),
         leading=18,
     )
@@ -220,13 +275,16 @@ def build_report(csv_path, output_pdf, last_month, vat_rate):
         budget_to_last_month = ytd["budgeted_cost"].sum()
 
         # Actual for the selected last month, including VAT.
-        last = dept[dept["month"] == last_month_dt]
-        actual_last_month_ex_vat = last["actuals_cost"].sum()
-        actual_last_month_incl_vat = actual_last_month_ex_vat * (1 + vat_rate)
+        ytd = dept[dept["month"] <= last_month_dt]
+
+        budget_to_last_month = ytd["budgeted_cost"].sum()
+
+        actual_to_last_month_ex_vat = ytd["actuals_cost"].sum()
+        actual_to_last_month_incl_vat = actual_to_last_month_ex_vat * (1 + vat_rate)
 
         # Variance is based on the selected last month's budget.
-        last_month_budget = last["budgeted_cost"].sum()
-        variance = actual_last_month_incl_vat - last_month_budget
+        last_month_budget = ytd["budgeted_cost"].sum()
+        variance = actual_to_last_month_incl_vat - last_month_budget
         variance_pct = (
             (variance / last_month_budget) * 100
             if last_month_budget != 0 else None
@@ -253,25 +311,33 @@ def build_report(csv_path, output_pdf, last_month, vat_rate):
         widget_contents = [
             [
                 Paragraph("BUDGET FOR THE YEAR", widget_label),
+                Spacer(1, 5 * mm),
                 Paragraph(full_money(annual_budget), widget_value),
+                Spacer(1, 5 * mm),
                 Paragraph("Sum of monthly budget", widget_detail),
             ],
             [
                 Paragraph(f"BUDGET TO {last_month_dt.strftime('%B').upper()}", widget_label),
+                Spacer(1, 5 * mm),
                 Paragraph(full_money(budget_to_last_month), widget_value),
+                Spacer(1, 5 * mm),
                 Paragraph("Jan through reporting month", widget_detail),
             ],
             [
                 Paragraph("ACTUAL TO LAST MONTH INCL. VAT", widget_label),
-                Paragraph(full_money(actual_last_month_incl_vat), widget_value),
+                Spacer(1, 5 * mm),
+                Paragraph(full_money(actual_to_last_month_incl_vat), widget_value),
+                Spacer(1, 5 * mm),
                 Paragraph(
-                    f"Ex-VAT: {full_money(actual_last_month_ex_vat)}",
+                    f"Ex-VAT: {full_money(actual_to_last_month_ex_vat)}",
                     widget_detail
                 ),
             ],
             [
                 Paragraph("VARIANCE VS LAST-MONTH BUDGET", widget_label),
+                Spacer(1, 5 * mm),
                 Paragraph(variance_text, widget_value),
+                Spacer(1, 5 * mm),
                 Paragraph(
                     "(Actual incl. VAT − Budget) / Budget × 100",
                     widget_detail
@@ -280,30 +346,38 @@ def build_report(csv_path, output_pdf, last_month, vat_rate):
         ]
 
         # One outer row containing four individual KPI cards.
-        cards = []
-        for content in widget_contents:
-            card = Table(
-                [[content[0]], [content[1]], [content[2]]],
-                colWidths=[widget_width],
-                rowHeights=[None, None, None],
-            )
-            card.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F7FA")),
-                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#D9DEE7")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
-                ("TOPPADDING", (0, 0), (-1, -1), 4 * mm),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3 * mm),
-            ]))
-            cards.append(card)
+        # cards = []
+        # for content in widget_contents:
+        #     card = Table(
+        #         [[content[0]], [content[1]], [content[2]]],
+        #         colWidths=[widget_width],
+        #         rowHeights=[None, None, None],
+        #     )
+        #     card.setStyle(TableStyle([
+        #         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F7FA")),
+        #         # ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#D9DEE7")),
+        #         ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        #         ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm),
+        #         ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
+        #         ("TOPPADDING", (0, 0), (-1, -1), 4 * mm),
+        #         ("BOTTOMPADDING", (0, 0), (-1, -1), 3 * mm),
+        #     ]))
+        #     cards.append(card)
 
         widget_table = Table(
-            [cards],
+            [widget_contents],
             colWidths=[widget_width] * 4,
         )
+        
+        # widget_table.setStyle(TableStyle([
+        #     ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        # ]))
         widget_table.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
         ]))
         widget_table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F7FA")),
