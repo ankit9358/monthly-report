@@ -35,6 +35,7 @@ REQUIRED_COLUMNS = {
     "Department(BM)",
     "budgeted_cost",
     "actuals_cost",
+    "Vendor"
 }
 
 
@@ -47,14 +48,54 @@ def money(value):
         return f"£{value / 1_000:.1f}K"
     return f"£{value:,.0f}"
 
-
 def full_money(value):
     return f"£{float(value):,.2f}"
-
 
 def pct(value):
     return f"{float(value):.1f}%"
 
+def clean_data(df, cloud_name):
+    # Work on a copy so the original dataframe is not modified
+    df = df.copy()
+
+    # Normalize text columns
+    df["Vendor"] = df["Vendor"].astype(str).str.strip().str.lower()
+    df["Department(BM)"] = df["Department(BM)"].astype(str).str.strip().str.lower()
+
+    # Split into Azure and GCP
+    df = df[df["Vendor"] == cloud_name].copy()
+
+    overall = df.groupby("month", as_index=False).agg(
+        budgeted_cost=("budgeted_cost", "sum"),
+        actuals_cost=("actuals_cost", "sum")
+    )
+
+    overall["Department(BM)"] = cloud_name
+    overall["Vendor"] = cloud_name
+
+    df = pd.concat([overall, df],ignore_index=True)
+    df = df[df["Department(BM)"] != "not set"].copy()
+    
+    totals = (
+            df
+            .groupby("Department(BM)", as_index=False)
+            .agg(
+                total_budget=("budgeted_cost", "sum"),
+                total_actual=("actuals_cost", "sum")
+            )
+        )
+    
+    valid_departments = totals[
+            (totals["total_budget"] != 0) |
+            (totals["total_actual"] != 0)
+        ]["Department(BM)"]
+
+    df = df[
+            df["Department(BM)"].isin(valid_departments)
+        ].copy()
+
+
+    return df
 
 def make_chart(department_df, department, last_month, output_dir):
     """Create monthly Budget vs Actual Incl. VAT column chart."""
@@ -186,14 +227,16 @@ def build_report(csv_path, output_pdf, last_month, vat_rate):
     df["budgeted_cost"] = pd.to_numeric(df["budgeted_cost"], errors="raise")
     df["actuals_cost"] = pd.to_numeric(df["actuals_cost"], errors="raise")
     df["Department(BM)"] = df["Department(BM)"].astype(str).str.strip()
+    df["Vendor"] = df["Vendor"].astype(str).str.strip()
+
 
     last_month_dt = pd.Period(last_month, freq="M").to_timestamp()
     year = last_month_dt.year
 
     # Use only the selected year.
-    df = df[df["month"].dt.year == year].copy()
-    if df.empty:
-        raise ValueError(f"No data found for year {year}")
+    # df = df[df["month"].dt.year == year].copy()
+    # if df.empty:
+    #     raise ValueError(f"No data found for year {year}")
 
     # Validate that the selected last month exists.
     if last_month_dt not in set(df["month"].unique()):
@@ -203,211 +246,200 @@ def build_report(csv_path, output_pdf, last_month, vat_rate):
     chart_dir = Path(output_pdf).parent / "_budget_report_charts"
     chart_dir.mkdir(parents=True, exist_ok=True)
 
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "ReportTitle",
-        parent=styles["Title"],
-        fontName="Helvetica-Bold",
-        fontSize=18,
-        leading=22,
-        textColor=colors.HexColor("#172033"),
-        spaceAfter=3 * mm,
-    )
-    subtitle_style = ParagraphStyle(
-        "Subtitle",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8.5,
-        textColor=colors.HexColor("#657085"),
-        leading=11,
-    )
-    widget_label = ParagraphStyle(
-        "WidgetLabel",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=8,
-        textColor=colors.HexColor("#657085"),
-        leading=10,
-    )
-    widget_value = ParagraphStyle(
-        "WidgetValue",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=13,
-        textColor=colors.HexColor("#172033"),
-        leading=18,
-    )
-    widget_detail = ParagraphStyle(
-        "WidgetDetail",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=7.5,
-        textColor=colors.HexColor("#657085"),
-        leading=9,
-    )
 
-    doc = SimpleDocTemplate(
-        str(output_pdf),
-        pagesize=A4,
-        rightMargin=12 * mm,
-        leftMargin=12 * mm,
-        topMargin=10 * mm,
-        bottomMargin=10 * mm,
-        title="Budget vs Actual Cost Report",
-        author="Python",
-    )
-
-    page_width = A4[0] - 24 * mm
-    widget_width = (page_width - 3 * 4 * mm) / 4
-
-    story = []
-
-    departments = sorted(df["Department(BM)"].unique())
-
-    for page_index, department in enumerate(departments):
-        dept = df[df["Department(BM)"] == department].copy()
-
-        # Budget for the whole year.
-        annual_budget = dept["budgeted_cost"].sum()
-
-        # Budget through the selected last month.
-        ytd = dept[dept["month"] <= last_month_dt]
-        budget_to_last_month = ytd["budgeted_cost"].sum()
-
-        # Actual for the selected last month, including VAT.
-        ytd = dept[dept["month"] <= last_month_dt]
-
-        budget_to_last_month = ytd["budgeted_cost"].sum()
-
-        actual_to_last_month_ex_vat = ytd["actuals_cost"].sum()
-        actual_to_last_month_incl_vat = actual_to_last_month_ex_vat * (1 + vat_rate)
-
-        # Variance is based on the selected last month's budget.
-        last_month_budget = ytd["budgeted_cost"].sum()
-        variance = actual_to_last_month_incl_vat - last_month_budget
-        variance_pct = (
-            (variance / last_month_budget) * 100
-            if last_month_budget != 0 else None
+    for cloud_name in ['azure', 'gcp']:
+        # ======================================================================
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "ReportTitle",
+            parent=styles["Title"],
+            fontName="Helvetica-Bold",
+            fontSize=18,
+            leading=22,
+            textColor=colors.HexColor("#172033"),
+            spaceAfter=3 * mm,
+        )
+        subtitle_style = ParagraphStyle(
+            "Subtitle",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=8.5,
+            textColor=colors.HexColor("#657085"),
+            leading=11,
+        )
+        widget_label = ParagraphStyle(
+            "WidgetLabel",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=8,
+            textColor=colors.HexColor("#657085"),
+            leading=10,
+        )
+        widget_value = ParagraphStyle(
+            "WidgetValue",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=13,
+            textColor=colors.HexColor("#172033"),
+            leading=18,
+        )
+        widget_detail = ParagraphStyle(
+            "WidgetDetail",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=7.5,
+            textColor=colors.HexColor("#657085"),
+            leading=9,
         )
 
-        story.append(Paragraph(
-            f"Budget vs Actual Cost — {department}",
-            title_style
-        ))
-        story.append(Paragraph(
-            f"Year: {year} &nbsp;&nbsp;|&nbsp;&nbsp; "
-            f"Reporting through: {last_month_dt.strftime('%B %Y')} "
-            f"&nbsp;&nbsp;|&nbsp;&nbsp; VAT: {vat_rate:.0%}",
-            subtitle_style
-        ))
-        story.append(Spacer(1, 5 * mm))
-
-        variance_text = (
-            f"{full_money(variance)} ({pct(variance_pct)})"
-            if variance_pct is not None
-            else f"{full_money(variance)} (N/A)"
+        doc = SimpleDocTemplate(
+            f"{cloud_name}_{output_pdf}",
+            pagesize=A4,
+            rightMargin=12 * mm,
+            leftMargin=12 * mm,
+            topMargin=10 * mm,
+            bottomMargin=10 * mm,
+            title="Budget vs Actual Cost Report",
+            author="Python",
         )
 
-        widget_contents = [
-            [
-                Paragraph("BUDGET FOR THE YEAR", widget_label),
-                Spacer(1, 5 * mm),
-                Paragraph(full_money(annual_budget), widget_value),
-                Spacer(1, 5 * mm),
-                Paragraph("Sum of monthly budget", widget_detail),
-            ],
-            [
-                Paragraph(f"BUDGET TO {last_month_dt.strftime('%B').upper()}", widget_label),
-                Spacer(1, 5 * mm),
-                Paragraph(full_money(budget_to_last_month), widget_value),
-                Spacer(1, 5 * mm),
-                Paragraph("Jan through reporting month", widget_detail),
-            ],
-            [
-                Paragraph("ACTUAL TO LAST MONTH INCL. VAT", widget_label),
-                Spacer(1, 5 * mm),
-                Paragraph(full_money(actual_to_last_month_incl_vat), widget_value),
-                Spacer(1, 5 * mm),
-                Paragraph(
-                    f"Ex-VAT: {full_money(actual_to_last_month_ex_vat)}",
-                    widget_detail
-                ),
-            ],
-            [
-                Paragraph("VARIANCE VS LAST-MONTH BUDGET", widget_label),
-                Spacer(1, 5 * mm),
-                Paragraph(variance_text, widget_value),
-                Spacer(1, 5 * mm),
-                Paragraph(
-                    "(Actual incl. VAT − Budget) / Budget × 100",
-                    widget_detail
-                ),
-            ],
-        ]
+        page_width = A4[0] - 24 * mm
+        widget_width = (page_width - 3 * 4 * mm) / 4
 
-        # One outer row containing four individual KPI cards.
-        # cards = []
-        # for content in widget_contents:
-        #     card = Table(
-        #         [[content[0]], [content[1]], [content[2]]],
-        #         colWidths=[widget_width],
-        #         rowHeights=[None, None, None],
-        #     )
-        #     card.setStyle(TableStyle([
-        #         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F7FA")),
-        #         # ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#D9DEE7")),
-        #         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        #         ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm),
-        #         ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
-        #         ("TOPPADDING", (0, 0), (-1, -1), 4 * mm),
-        #         ("BOTTOMPADDING", (0, 0), (-1, -1), 3 * mm),
-        #     ]))
-        #     cards.append(card)
+        story = []
+        # ======================================================================
 
-        widget_table = Table(
-            [widget_contents],
-            colWidths=[widget_width] * 4,
-        )
-        
-        # widget_table.setStyle(TableStyle([
-        #     ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        # ]))
-        widget_table.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ]))
-        widget_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F7FA")),
-            ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#D9DEE7")),
-            ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#D9DEE7")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
-            ("TOPPADDING", (0, 0), (-1, -1), 4 * mm),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3 * mm),
-        ]))
-        story.append(widget_table)
-        story.append(Spacer(1, 7 * mm))
+        new_df = clean_data(df, cloud_name)
+        departments = sorted(new_df["Department(BM)"].unique())
 
-        chart_path = make_chart(dept, department, last_month_dt, chart_dir)
-        chart = Image(str(chart_path), width=page_width, height=86 * mm)
-        story.append(chart)
+        for page_index, department in enumerate(departments):
+            dept = new_df[new_df["Department(BM)"] == department].copy()
 
-        story.append(Spacer(1, 3 * mm))
-        story.append(Paragraph(
-            "Variance % formula: (Actual cost including VAT − Budget cost) / "
-            "Budget cost × 100. Monthly actual cost is calculated as "
-            f"actuals_cost × (1 + {vat_rate:.0%}).",
-            subtitle_style
-        ))
+            # Budget for the whole year.
+            annual_budget = dept["budgeted_cost"].sum()
 
-        if page_index < len(departments) - 1:
-            story.append(PageBreak())
+            # Budget through the selected last month.
+            ytd = dept[dept["month"] <= last_month_dt]
+            budget_to_last_month = ytd["budgeted_cost"].sum()
 
-    doc.build(story)
+            # Actual for the selected last month, including VAT.
+            ytd = dept[dept["month"] <= last_month_dt]
+
+            budget_to_last_month = ytd["budgeted_cost"].sum()
+
+            actual_to_last_month_ex_vat = ytd["actuals_cost"].sum()
+            actual_to_last_month_incl_vat = actual_to_last_month_ex_vat * (1 + vat_rate)
+
+            # Variance is based on the selected last month's budget.
+            last_month_budget = ytd["budgeted_cost"].sum()
+            variance = actual_to_last_month_incl_vat - last_month_budget
+            variance_pct = (
+                (variance / last_month_budget) * 100
+                if last_month_budget != 0 else None
+            )
+
+            story.append(Paragraph(
+                f"Budget vs Actual Cost — {department}",
+                title_style
+            ))
+            story.append(Paragraph(
+                f"Year: {year} &nbsp;&nbsp;|&nbsp;&nbsp; "
+                f"Reporting through: {last_month_dt.strftime('%B %Y')} "
+                f"&nbsp;&nbsp;|&nbsp;&nbsp; VAT: {vat_rate:.0%}",
+                subtitle_style
+            ))
+            story.append(Spacer(1, 5 * mm))
+
+            variance_text = (
+                f"{full_money(variance)} ({pct(variance_pct)})"
+                if variance_pct is not None
+                else f"{full_money(variance)} (N/A)"
+            )
+
+            widget_contents = [
+                [
+                    Paragraph("BUDGET FOR THE YEAR", widget_label),
+                    Spacer(1, 5 * mm),
+                    Paragraph(full_money(annual_budget), widget_value),
+                    Spacer(1, 5 * mm),
+                    Paragraph("Sum of monthly budget", widget_detail),
+                ],
+                [
+                    Paragraph(f"BUDGET TO {last_month_dt.strftime('%B').upper()}", widget_label),
+                    Spacer(1, 5 * mm),
+                    Paragraph(full_money(budget_to_last_month), widget_value),
+                    Spacer(1, 5 * mm),
+                    Paragraph("Jan through reporting month", widget_detail),
+                ],
+                [
+                    Paragraph("ACTUAL TO LAST MONTH INCL. VAT", widget_label),
+                    Spacer(1, 5 * mm),
+                    Paragraph(full_money(actual_to_last_month_incl_vat), widget_value),
+                    Spacer(1, 5 * mm),
+                    Paragraph(
+                        f"Ex-VAT: {full_money(actual_to_last_month_ex_vat)}",
+                        widget_detail
+                    ),
+                ],
+                [
+                    Paragraph("VARIANCE VS LAST-MONTH BUDGET", widget_label),
+                    Spacer(1, 5 * mm),
+                    Paragraph(variance_text, widget_value),
+                    Spacer(1, 5 * mm),
+                    Paragraph(
+                        "(Actual incl. VAT − Budget) / Budget × 100",
+                        widget_detail
+                    ),
+                ],
+            ]
+
+            widget_table = Table(
+                [widget_contents],
+                colWidths=[widget_width] * 4,
+            )
+            
+            # widget_table.setStyle(TableStyle([
+            #     ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            # ]))
+            widget_table.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]))
+            widget_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F7FA")),
+                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#D9DEE7")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#D9DEE7")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
+                ("TOPPADDING", (0, 0), (-1, -1), 4 * mm),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3 * mm),
+            ]))
+            story.append(widget_table)
+            story.append(Spacer(1, 7 * mm))
+
+            chart_path = make_chart(dept, department, last_month_dt, chart_dir)
+            chart = Image(str(chart_path), width=page_width, height=86 * mm)
+            story.append(chart)
+
+            story.append(Spacer(1, 3 * mm))
+            story.append(Paragraph(
+                "Variance % formula: (Actual cost including VAT − Budget cost) / "
+                "Budget cost × 100. Monthly actual cost is calculated as "
+                f"actuals_cost × (1 + {vat_rate:.0%}).",
+                subtitle_style
+            ))
+
+            if page_index < len(departments) - 1:
+                story.append(PageBreak())
+
+        doc.build(story)
+        print(f"Report generated for {cloud_name}: {cloud_name}_{output_pdf}")
+        print(f"Departments/pages: {len(departments)}")
+        print(f"Reporting through: {last_month}")
 
     # Remove generated chart images after the PDF has been built.
     for path in chart_dir.glob("*.png"):
@@ -417,10 +449,7 @@ def build_report(csv_path, output_pdf, last_month, vat_rate):
     except OSError:
         pass
 
-    print(f"Report generated: {output_pdf}")
-    print(f"Departments/pages: {len(departments)}")
-    print(f"Reporting through: {last_month}")
-
+    print("Budget report for Azure and GCP have been created successfully!")
 
 def main():
     parser = argparse.ArgumentParser(description="Generate department budget vs actual PDF report.")
